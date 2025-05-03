@@ -7,7 +7,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import asyncio
 import os
 
-ASK_RUNNING, ASK_URGE = range(2)
+ASK_NAME, ASK_RUNNING, ASK_URGE = range(2)
 yes_no_keyboard = ReplyKeyboardMarkup([["بله", "خیر"]], one_time_keyboard=True, resize_keyboard=True)
 
 # --- خواندن یوزرها از فایل ---
@@ -18,31 +18,50 @@ if os.path.exists("users.txt"):
             user_ids.add(int(line.strip()))
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    
     user_id = update.effective_chat.id
     if user_id not in user_ids:
         user_ids.add(user_id)
         with open("users.txt", "a") as f:
             f.write(str(user_id) + "\n")
-
-    await update.message.reply_text("سلام! امروز دویدی؟", reply_markup=yes_no_keyboard)
-    return ASK_RUNNING
+    await update.message.reply_text("سلام! اول از همه، اسمتو بگو:")
+    return ASK_NAME
 
 async def handle_running(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['ran'] = update.message.text
     await update.message.reply_text("وسوسه داشتی؟", reply_markup=yes_no_keyboard)
     return ASK_URGE
 
+from datetime import datetime, timedelta
+
 async def handle_urge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['urge'] = update.message.text
+    context.user_data['urge'] = update.message.text.strip()
     ran = context.user_data['ran']
     urge = context.user_data['urge']
-    with open("log.csv", "a", encoding="utf-8") as f:
-        f.write(f"{update.message.date.date()},{ran},{urge}\n")
-    await update.message.reply_text("ثبت شد. فردا هم اینجام!")
-    return ConversationHandler.END
+    user_id = context.user_data['user_id']
+    name = context.user_data['name']
+    today = datetime.now().date()
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("اوکی، بیخیال شدی فعلاً.")
+    # بررسی و محاسبه استریک
+    streak = 1
+    try:
+        with open("log.csv", "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            for line in reversed(lines):
+                uid, date_str, *_ , prev_streak = line.strip().split(",")
+                if int(uid) == user_id:
+                    last_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    if last_date == today - timedelta(days=1):
+                        streak = int(prev_streak) + 1
+                    break
+    except FileNotFoundError:
+        pass
+
+    # ذخیره اطلاعات امروز
+    with open("log.csv", "a", encoding="utf-8") as f:
+        f.write(f"{user_id},{today},{ran},{urge},{streak}\n")
+
+    await update.message.reply_text(f"ثبت شد، {name} جان!\nاستریک فعلیت: {streak} روز پشت‌سرهم!")
     return ConversationHandler.END
 
 # --- ارسال پیام یادآوری به همه یوزرها ---
@@ -67,11 +86,11 @@ scheduler.start()
 conv_handler = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
     states={
+        ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_name)],
         ASK_RUNNING: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_running)],
         ASK_URGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_urge)],
     },
     fallbacks=[CommandHandler("cancel", cancel)],
 )
-
 app.add_handler(conv_handler)
 app.run_polling()
