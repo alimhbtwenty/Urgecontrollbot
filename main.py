@@ -6,8 +6,12 @@ from telegram.ext import (
 from apscheduler.schedulers.background import BackgroundScheduler
 import asyncio
 import os
+from datetime import datetime, timedelta
 
-ASK_NAME, ASK_RUNNING, ASK_URGE = range(2)
+# وضعیت‌های مربوط به فرآیند گفتگو
+ASK_NAME, ASK_RUNNING, ASK_URGE = range(3)
+
+# کیبورد بله/خیر
 yes_no_keyboard = ReplyKeyboardMarkup([["بله", "خیر"]], one_time_keyboard=True, resize_keyboard=True)
 
 # --- خواندن یوزرها از فایل ---
@@ -17,8 +21,8 @@ if os.path.exists("users.txt"):
         for line in f:
             user_ids.add(int(line.strip()))
 
+# تابع شروع
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    
     user_id = update.effective_chat.id
     if user_id not in user_ids:
         user_ids.add(user_id)
@@ -27,13 +31,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("سلام! اول از همه، اسمتو بگو:")
     return ASK_NAME
 
+# تابع برای گرفتن اسم کاربر
+async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.message.text.strip()
+    context.user_data['name'] = name
+    user_id = update.effective_chat.id
+    context.user_data['user_id'] = user_id  # ذخیره id کاربر برای استفاده در ادامه
+    await update.message.reply_text(f"مرسی {name} جان! حالا بگو، امروز دویدی؟", reply_markup=yes_no_keyboard)
+    return ASK_RUNNING
+
+# تابع برای دریافت وضعیت دویدن
 async def handle_running(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['ran'] = update.message.text
     await update.message.reply_text("وسوسه داشتی؟", reply_markup=yes_no_keyboard)
     return ASK_URGE
 
-from datetime import datetime, timedelta
-
+# تابع برای دریافت وضعیت وسوسه
 async def handle_urge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['urge'] = update.message.text.strip()
     ran = context.user_data['ran']
@@ -64,6 +77,11 @@ async def handle_urge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"ثبت شد، {name} جان!\nاستریک فعلیت: {streak} روز پشت‌سرهم!")
     return ConversationHandler.END
 
+# تابع لغو
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("اوکی، بیخیال شدی فعلاً.")
+    return ConversationHandler.END
+
 # --- ارسال پیام یادآوری به همه یوزرها ---
 async def send_reminder(app):
     for user_id in user_ids:
@@ -73,7 +91,6 @@ async def send_reminder(app):
             print(f"خطا در ارسال پیام به {user_id}: {e}")
 
 # --- ساخت اپلیکیشن ---
-
 TOKEN = os.getenv("BOT_TOKEN")
 app = ApplicationBuilder().token(TOKEN).build()
 
@@ -92,5 +109,6 @@ conv_handler = ConversationHandler(
     },
     fallbacks=[CommandHandler("cancel", cancel)],
 )
+
 app.add_handler(conv_handler)
 app.run_polling()
