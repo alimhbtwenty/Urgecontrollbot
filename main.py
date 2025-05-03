@@ -1,0 +1,75 @@
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    filters, ContextTypes, ConversationHandler
+)
+from apscheduler.schedulers.background import BackgroundScheduler
+import asyncio
+import os
+
+ASK_RUNNING, ASK_URGE = range(2)
+yes_no_keyboard = ReplyKeyboardMarkup([["بله", "خیر"]], one_time_keyboard=True, resize_keyboard=True)
+
+# --- خواندن یوزرها از فایل ---
+user_ids = set()
+if os.path.exists("users.txt"):
+    with open("users.txt", "r") as f:
+        for line in f:
+            user_ids.add(int(line.strip()))
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_chat.id
+    if user_id not in user_ids:
+        user_ids.add(user_id)
+        with open("users.txt", "a") as f:
+            f.write(str(user_id) + "\n")
+
+    await update.message.reply_text("سلام! امروز دویدی؟", reply_markup=yes_no_keyboard)
+    return ASK_RUNNING
+
+async def handle_running(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['ran'] = update.message.text
+    await update.message.reply_text("وسوسه داشتی؟", reply_markup=yes_no_keyboard)
+    return ASK_URGE
+
+async def handle_urge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['urge'] = update.message.text
+    ran = context.user_data['ran']
+    urge = context.user_data['urge']
+    with open("log.csv", "a", encoding="utf-8") as f:
+        f.write(f"{update.message.date.date()},{ran},{urge}\n")
+    await update.message.reply_text("ثبت شد. فردا هم اینجام!")
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("اوکی، بیخیال شدی فعلاً.")
+    return ConversationHandler.END
+
+# --- ارسال پیام یادآوری به همه یوزرها ---
+async def send_reminder(app):
+    for user_id in user_ids:
+        try:
+            await app.bot.send_message(chat_id=user_id, text="یادت نره امروز وضعیتتو ثبت کنی!\n/start رو بزن.")
+        except Exception as e:
+            print(f"خطا در ارسال پیام به {user_id}: {e}")
+
+# --- ساخت اپلیکیشن ---
+app = ApplicationBuilder().token("8038506855:AAF0ftMI5KL8GGlYIRf3UxJ9B6R-aO1JeuE").build()
+
+# --- زمان‌بندی یادآوری ---
+scheduler = BackgroundScheduler()
+scheduler.add_job(lambda: asyncio.run(send_reminder(app)), "cron", hour=21, minute=0)
+scheduler.start()
+
+# --- ConversationHandler ---
+conv_handler = ConversationHandler(
+    entry_points=[CommandHandler("start", start)],
+    states={
+        ASK_RUNNING: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_running)],
+        ASK_URGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_urge)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel)],
+)
+
+app.add_handler(conv_handler)
+app.run_polling()
