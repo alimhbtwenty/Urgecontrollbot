@@ -54,7 +54,9 @@ async def send_reminder(app):
             print(f"خطا در ارسال پیام به {user_id}: {e}")
 
 # --- ساخت اپلیکیشن ---
-app = ApplicationBuilder().token("8038506855:AAF0ftMI5KL8GGlYIRf3UxJ9B6R-aO1JeuE").build()
+
+TOKEN = os.getenv("BOT_TOKEN")
+app = ApplicationBuilder().token(TOKEN).build()
 
 # --- زمان‌بندی یادآوری ---
 scheduler = BackgroundScheduler()
