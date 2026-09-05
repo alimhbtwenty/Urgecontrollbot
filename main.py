@@ -1,114 +1,189 @@
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    filters, ContextTypes, ConversationHandler
-)
-from apscheduler.schedulers.background import BackgroundScheduler
-import asyncio
+import json
 import os
-from datetime import datetime, timedelta
 
-# وضعیت‌های مربوط به فرآیند گفتگو
-ASK_NAME, ASK_RUNNING, ASK_URGE = range(3)
-
-# کیبورد بله/خیر
-yes_no_keyboard = ReplyKeyboardMarkup([["بله", "خیر"]], one_time_keyboard=True, resize_keyboard=True)
-
-# --- خواندن یوزرها از فایل ---
-user_ids = set()
-if os.path.exists("users.txt"):
-    with open("users.txt", "r") as f:
-        for line in f:
-            user_ids.add(int(line.strip()))
-
-# تابع شروع
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_chat.id
-    if user_id not in user_ids:
-        user_ids.add(user_id)
-        with open("users.txt", "a") as f:
-            f.write(str(user_id) + "\n")
-    await update.message.reply_text("سلام! اول از همه، اسمتو بگو:")
-    return ASK_NAME
-
-# تابع برای گرفتن اسم کاربر
-async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = update.message.text.strip()
-    context.user_data['name'] = name
-    user_id = update.effective_chat.id
-    context.user_data['user_id'] = user_id  # ذخیره id کاربر برای استفاده در ادامه
-    await update.message.reply_text(f"مرسی {name} جان! حالا بگو، امروز دویدی؟", reply_markup=yes_no_keyboard)
-    return ASK_RUNNING
-
-# تابع برای دریافت وضعیت دویدن
-async def handle_running(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['ran'] = update.message.text
-    await update.message.reply_text("وسوسه داشتی؟", reply_markup=yes_no_keyboard)
-    return ASK_URGE
-
-# تابع برای دریافت وضعیت وسوسه
-async def handle_urge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['urge'] = update.message.text.strip()
-    ran = context.user_data['ran']
-    urge = context.user_data['urge']
-    user_id = context.user_data['user_id']
-    name = context.user_data['name']
-    today = datetime.now().date()
-
-    # بررسی و محاسبه استریک
-    streak = 1
-    try:
-        with open("log.csv", "r", encoding="utf-8") as f:
-            lines = f.readlines()
-            for line in reversed(lines):
-                uid, date_str, *_ , prev_streak = line.strip().split(",")
-                if int(uid) == user_id:
-                    last_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-                    if last_date == today - timedelta(days=1):
-                        streak = int(prev_streak) + 1
-                    break
-    except FileNotFoundError:
-        pass
-
-    # ذخیره اطلاعات امروز
-    with open("log.csv", "a", encoding="utf-8") as f:
-        f.write(f"{user_id},{today},{ran},{urge},{streak}\n")
-
-    await update.message.reply_text(f"ثبت شد، {name} جان!\nاستریک فعلیت: {streak} روز پشت‌سرهم!")
-    return ConversationHandler.END
-
-# تابع لغو
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("اوکی، بیخیال شدی فعلاً.")
-    return ConversationHandler.END
-
-# --- ارسال پیام یادآوری به همه یوزرها ---
-async def send_reminder(app):
-    for user_id in user_ids:
-        try:
-            await app.bot.send_message(chat_id=user_id, text="یادت نره امروز وضعیتتو ثبت کنی!\n/start رو بزن.")
-        except Exception as e:
-            print(f"خطا در ارسال پیام به {user_id}: {e}")
-
-# --- ساخت اپلیکیشن ---
-TOKEN = os.getenv("BOT_TOKEN")
-app = ApplicationBuilder().token(TOKEN).build()
-
-# --- زمان‌بندی یادآوری ---
-scheduler = BackgroundScheduler()
-scheduler.add_job(lambda: asyncio.run(send_reminder(app)), "cron", hour=21, minute=0)
-scheduler.start()
-
-# --- ConversationHandler ---
-conv_handler = ConversationHandler(
-    entry_points=[CommandHandler("start", start)],
-    states={
-        ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_name)],
-        ASK_RUNNING: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_running)],
-        ASK_URGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_urge)],
-    },
-    fallbacks=[CommandHandler("cancel", cancel)],
+import jdatetime
+from dotenv import load_dotenv
+from telegram import ReplyKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
 )
 
-app.add_handler(conv_handler)
-app.run_polling()
+load_dotenv()
+jdatetime.set_locale("fa_IR")
+
+TOKEN = os.getenv("BOT_TOKEN")
+
+USERS_FILE = "users.json"
+PLACES_FILE = "places.json"
+LAST_REPORT_FILE = "last_report.json"
+LOG_FILE = "log.csv"
+
+ACTION_IN = "ورود"
+ACTION_OUT = "خروج"
+BTN_IN = f"🟢 ثبت {ACTION_IN}"
+BTN_OUT = f"🔴 ثبت {ACTION_OUT}"
+BTN_NEW_PLACE = "➕ مکان جدید"
+BTN_CANCEL = "❌ انصراف"
+
+FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+main_keyboard = ReplyKeyboardMarkup([[BTN_IN, BTN_OUT]], resize_keyboard=True)
+
+
+def load_json(path):
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+users = load_json(USERS_FILE)
+places = load_json(PLACES_FILE)  # chat_id -> [place, ...]
+last_report_day = load_json(LAST_REPORT_FILE)  # chat_id -> "1405/06/14"
+
+
+def to_fa_digits(s):
+    return s.translate(FA_DIGITS)
+
+
+def build_report(chat_id, action, place):
+    now = jdatetime.datetime.now()
+    today_str = now.strftime("%Y/%m/%d")
+    time_str = to_fa_digits(f"{now.hour}:{now.minute:02d}")
+
+    lines = []
+    if last_report_day.get(chat_id) != today_str:
+        lines += [
+            "سلام",
+            now.strftime("%A"),
+            to_fa_digits(today_str),
+        ]
+        last_report_day[chat_id] = today_str
+        save_json(LAST_REPORT_FILE, last_report_day)
+
+    if action == ACTION_IN:
+        lines.append(f"ورود به {place}")
+    else:
+        lines.append(ACTION_OUT)
+    lines.append(time_str)
+
+    return "\n".join(lines)
+
+
+def places_keyboard(chat_id):
+    saved = places.get(chat_id, [])
+    rows = [saved[i : i + 2] for i in range(0, len(saved), 2)]
+    rows.append([BTN_NEW_PLACE])
+    rows.append([BTN_CANCEL])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    if chat_id not in users:
+        users[chat_id] = update.effective_user.first_name or "کاربر"
+        save_json(USERS_FILE, users)
+    context.user_data.clear()
+    await update.message.reply_text(
+        f"سلام {users[chat_id]} جان!\n"
+        "هر وقت رسیدی یا خواستی از یه جا بری، یکی از دکمه‌های زیر رو بزن، "
+        "بعدش اسم مکان رو انتخاب کن. همین!",
+        reply_markup=main_keyboard,
+    )
+
+
+async def ask_place(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    action = ACTION_IN if update.message.text == BTN_IN else ACTION_OUT
+    context.user_data.clear()
+    context.user_data["pending_action"] = action
+    chat_id = str(update.effective_chat.id)
+    await update.message.reply_text(
+        "کجا بودی؟ از لیست انتخاب کن یا مکان جدید اضافه کن:",
+        reply_markup=places_keyboard(chat_id),
+    )
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("لغو شد.", reply_markup=main_keyboard)
+
+
+async def ask_new_place_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "pending_action" not in context.user_data:
+        await update.message.reply_text(
+            "اول یکی از دکمه‌های ورود یا خروج رو بزن.", reply_markup=main_keyboard
+        )
+        return
+    context.user_data["awaiting_new_place"] = True
+    await update.message.reply_text("اسم مکان جدید رو بنویس:")
+
+
+async def record_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id, action, place):
+    name = users.get(chat_id, update.effective_user.first_name or "کاربر")
+    now = jdatetime.datetime.now()
+
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{chat_id},{name},{action},{place},{now.togregorian().isoformat()}\n")
+
+    report = build_report(chat_id, action, place)
+    await update.message.reply_text(
+        f"کپی کن و بفرست تو گروه:\n```\n{report}\n```",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=main_keyboard,
+    )
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    text = update.message.text.strip()
+
+    if context.user_data.get("awaiting_new_place"):
+        place = text
+        saved = places.setdefault(chat_id, [])
+        if place not in saved:
+            saved.append(place)
+            save_json(PLACES_FILE, places)
+        action = context.user_data.pop("pending_action")
+        context.user_data.pop("awaiting_new_place")
+        await record_entry(update, context, chat_id, action, place)
+        return
+
+    action = context.user_data.get("pending_action")
+    if action and text in places.get(chat_id, []):
+        context.user_data.pop("pending_action")
+        await record_entry(update, context, chat_id, action, text)
+        return
+
+    await update.message.reply_text(
+        "متوجه نشدم. یکی از دکمه‌های ورود یا خروج رو بزن.", reply_markup=main_keyboard
+    )
+
+
+def main():
+    if not TOKEN:
+        raise RuntimeError("متغیر محیطی BOT_TOKEN تنظیم نشده")
+
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_IN}$"), ask_place))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_OUT}$"), ask_place))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_NEW_PLACE}$"), ask_new_place_name))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_CANCEL}$"), cancel))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
