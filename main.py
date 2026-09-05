@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 
 from dotenv import load_dotenv
-from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import ReplyKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -15,106 +15,129 @@ from telegram.ext import (
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
-TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")  # چت/گروه همکارها که گزارش‌ها براش ارسال می‌شه
 
 USERS_FILE = "users.json"
+PLACES_FILE = "places.json"
 LOG_FILE = "log.csv"
 
 ACTION_IN = "ورود"
 ACTION_OUT = "خروج"
 BTN_IN = f"🟢 ثبت {ACTION_IN}"
 BTN_OUT = f"🔴 ثبت {ACTION_OUT}"
-BTN_LOCATION = "📍 ارسال موقعیت مکانی"
+BTN_NEW_PLACE = "➕ مکان جدید"
 BTN_CANCEL = "❌ انصراف"
 
 main_keyboard = ReplyKeyboardMarkup([[BTN_IN, BTN_OUT]], resize_keyboard=True)
-location_keyboard = ReplyKeyboardMarkup(
-    [[KeyboardButton(BTN_LOCATION, request_location=True)], [BTN_CANCEL]],
-    resize_keyboard=True,
-)
 
 
-def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
+def load_json(path):
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
 
-def save_users(users):
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-users = load_users()
+users = load_json(USERS_FILE)
+places = load_json(PLACES_FILE)  # chat_id -> [place, ...]
+
+
+def places_keyboard(chat_id):
+    saved = places.get(chat_id, [])
+    rows = [saved[i : i + 2] for i in range(0, len(saved), 2)]
+    rows.append([BTN_NEW_PLACE])
+    rows.append([BTN_CANCEL])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     if chat_id not in users:
         users[chat_id] = update.effective_user.first_name or "کاربر"
-        save_users(users)
+        save_json(USERS_FILE, users)
+    context.user_data.clear()
     await update.message.reply_text(
         f"سلام {users[chat_id]} جان!\n"
-        "هر وقت رسیدی یا خواستی از یه جا بری، یکی از دکمه‌های زیر رو بزن "
-        "و بعدش موقعیتتو بفرست، همین!",
+        "هر وقت رسیدی یا خواستی از یه جا بری، یکی از دکمه‌های زیر رو بزن، "
+        "بعدش اسم مکان رو انتخاب کن. همین!",
         reply_markup=main_keyboard,
     )
 
 
-async def ask_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ask_place(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = ACTION_IN if update.message.text == BTN_IN else ACTION_OUT
+    context.user_data.clear()
     context.user_data["pending_action"] = action
+    chat_id = str(update.effective_chat.id)
     await update.message.reply_text(
-        "خب، حالا دکمه لوکیشن رو بزن:", reply_markup=location_keyboard
+        "کجا بودی؟ از لیست انتخاب کن یا مکان جدید اضافه کن:",
+        reply_markup=places_keyboard(chat_id),
     )
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop("pending_action", None)
+    context.user_data.clear()
     await update.message.reply_text("لغو شد.", reply_markup=main_keyboard)
 
 
-async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    action = context.user_data.pop("pending_action", None)
-    if not action:
+async def ask_new_place_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "pending_action" not in context.user_data:
         await update.message.reply_text(
             "اول یکی از دکمه‌های ورود یا خروج رو بزن.", reply_markup=main_keyboard
         )
         return
+    context.user_data["awaiting_new_place"] = True
+    await update.message.reply_text("اسم مکان جدید رو بنویس:")
 
-    chat_id = str(update.effective_chat.id)
+
+async def record_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id, action, place):
     name = users.get(chat_id, update.effective_user.first_name or "کاربر")
     now = datetime.now()
-    location = update.message.location
-    lat, lon = location.latitude, location.longitude
-
-    emoji = "🟢" if action == ACTION_IN else "🔴"
-    caption = (
-        f"{emoji} ثبت {action}\n"
-        f"👤 {name}\n"
-        f"🕒 {now.strftime('%H:%M')}   📅 {now.strftime('%Y-%m-%d')}"
-    )
 
     with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"{chat_id},{name},{action},{now.isoformat()},{lat},{lon}\n")
+        f.write(f"{chat_id},{name},{action},{place},{now.isoformat()}\n")
 
-    await update.message.reply_text(f"ثبت شد ✅\n{caption}", reply_markup=main_keyboard)
+    emoji = "🟢" if action == ACTION_IN else "🔴"
+    report = (
+        f"{emoji} ثبت {action}\n"
+        f"👤 {name}\n"
+        f"📍 {place}\n"
+        f"🕒 {now.strftime('%H:%M')}   📅 {now.strftime('%Y-%m-%d')}"
+    )
+    await update.message.reply_text(
+        f"ثبت شد ✅ (این پیام رو کپی یا فوروارد کن تو گروه واتساپ)\n\n{report}",
+        reply_markup=main_keyboard,
+    )
 
-    if TARGET_CHAT_ID:
-        try:
-            await context.bot.send_message(chat_id=TARGET_CHAT_ID, text=caption)
-            await context.bot.send_location(
-                chat_id=TARGET_CHAT_ID, latitude=lat, longitude=lon
-            )
-        except Exception as e:
-            print(f"خطا در ارسال به چت همکارها: {e}")
-    else:
-        print("TARGET_CHAT_ID تنظیم نشده، گزارش فقط برای خود کاربر ثبت شد.")
 
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    text = update.message.text.strip()
 
-async def get_chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"chat id: {update.effective_chat.id}")
+    if context.user_data.get("awaiting_new_place"):
+        place = text
+        saved = places.setdefault(chat_id, [])
+        if place not in saved:
+            saved.append(place)
+            save_json(PLACES_FILE, places)
+        action = context.user_data.pop("pending_action")
+        context.user_data.pop("awaiting_new_place")
+        await record_entry(update, context, chat_id, action, place)
+        return
+
+    action = context.user_data.get("pending_action")
+    if action and text in places.get(chat_id, []):
+        context.user_data.pop("pending_action")
+        await record_entry(update, context, chat_id, action, text)
+        return
+
+    await update.message.reply_text(
+        "متوجه نشدم. یکی از دکمه‌های ورود یا خروج رو بزن.", reply_markup=main_keyboard
+    )
 
 
 def main():
@@ -124,11 +147,11 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("chatid", get_chat_id))
-    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_IN}$"), ask_location))
-    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_OUT}$"), ask_location))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_IN}$"), ask_place))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_OUT}$"), ask_place))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_NEW_PLACE}$"), ask_new_place_name))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_CANCEL}$"), cancel))
-    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     app.run_polling()
 
