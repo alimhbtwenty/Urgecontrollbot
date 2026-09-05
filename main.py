@@ -1,9 +1,10 @@
 import json
 import os
-from datetime import datetime
 
+import jdatetime
 from dotenv import load_dotenv
 from telegram import ReplyKeyboardMarkup, Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -13,11 +14,13 @@ from telegram.ext import (
 )
 
 load_dotenv()
+jdatetime.set_locale("fa_IR")
 
 TOKEN = os.getenv("BOT_TOKEN")
 
 USERS_FILE = "users.json"
 PLACES_FILE = "places.json"
+LAST_REPORT_FILE = "last_report.json"
 LOG_FILE = "log.csv"
 
 ACTION_IN = "ورود"
@@ -26,6 +29,8 @@ BTN_IN = f"🟢 ثبت {ACTION_IN}"
 BTN_OUT = f"🔴 ثبت {ACTION_OUT}"
 BTN_NEW_PLACE = "➕ مکان جدید"
 BTN_CANCEL = "❌ انصراف"
+
+FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
 
 main_keyboard = ReplyKeyboardMarkup([[BTN_IN, BTN_OUT]], resize_keyboard=True)
 
@@ -44,6 +49,35 @@ def save_json(path, data):
 
 users = load_json(USERS_FILE)
 places = load_json(PLACES_FILE)  # chat_id -> [place, ...]
+last_report_day = load_json(LAST_REPORT_FILE)  # chat_id -> "1405/06/14"
+
+
+def to_fa_digits(s):
+    return s.translate(FA_DIGITS)
+
+
+def build_report(chat_id, action, place):
+    now = jdatetime.datetime.now()
+    today_str = now.strftime("%Y/%m/%d")
+    time_str = to_fa_digits(f"{now.hour}:{now.minute:02d}")
+
+    lines = []
+    if last_report_day.get(chat_id) != today_str:
+        lines += [
+            "سلام",
+            now.strftime("%A"),
+            to_fa_digits(today_str),
+        ]
+        last_report_day[chat_id] = today_str
+        save_json(LAST_REPORT_FILE, last_report_day)
+
+    if action == ACTION_IN:
+        lines.append(f"ورود به {place}")
+    else:
+        lines.append(ACTION_OUT)
+    lines.append(time_str)
+
+    return "\n".join(lines)
 
 
 def places_keyboard(chat_id):
@@ -96,20 +130,15 @@ async def ask_new_place_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def record_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id, action, place):
     name = users.get(chat_id, update.effective_user.first_name or "کاربر")
-    now = datetime.now()
+    now = jdatetime.datetime.now()
 
     with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"{chat_id},{name},{action},{place},{now.isoformat()}\n")
+        f.write(f"{chat_id},{name},{action},{place},{now.togregorian().isoformat()}\n")
 
-    emoji = "🟢" if action == ACTION_IN else "🔴"
-    report = (
-        f"{emoji} ثبت {action}\n"
-        f"👤 {name}\n"
-        f"📍 {place}\n"
-        f"🕒 {now.strftime('%H:%M')}   📅 {now.strftime('%Y-%m-%d')}"
-    )
+    report = build_report(chat_id, action, place)
     await update.message.reply_text(
-        f"ثبت شد ✅ (این پیام رو کپی یا فوروارد کن تو گروه واتساپ)\n\n{report}",
+        f"کپی کن و بفرست تو گروه:\n```\n{report}\n```",
+        parse_mode=ParseMode.MARKDOWN,
         reply_markup=main_keyboard,
     )
 
